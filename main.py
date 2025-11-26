@@ -6,7 +6,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 # ================= НАСТРОЙКИ =================
-TOKEN = "ВАШ_ТОКЕН"
+TOKEN = "6021062306:AAHTS2uu15SPOCb5RxKhYVLTHldi6fAOn3A"
 DELAY_SECONDS = 1.0  # Время ожидания следующего сообщения (в секундах)
 # =============================================
 

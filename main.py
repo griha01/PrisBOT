@@ -7,11 +7,13 @@ from aiogram.types import Message
 
 # ================= НАСТРОЙКИ =================
 TOKEN = "6021062306:AAHTS2uu15SPOCb5RxKhYVLTHldi6fAOn3A"
-DELAY_SECONDS = 1.0  # Время ожидания следующего сообщения (в секундах)
+DELAY_SECONDS = 1.0
 # =============================================
 
-# Словари данных (как в прошлом коде)
+# Список оружия для распознавания
 WEAPONS = ['яд', 'самопал', 'пал', 'финка', 'фин', 'финки']
+
+# Типы ударов для расчета восстановления
 HIT_TYPES = {
     'ухо': 'head', 'колено': 'head',
     'пах': 'groin',
@@ -19,109 +21,166 @@ HIT_TYPES = {
     'грудь': 'chest', 'удар в грудь': 'chest'
 }
 
+# Категории боссов
+CAT_BESPREDEL = ['сизый', 'махно', 'лютый', 'шайба']
+CAT_VERTUKHAI = ['палыч', 'циклоп', 'бес', 'паленый', 'борзов', 'бурят', 'хирург', 'раиса', 'близнецы', 'дюбель']
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
-# Хранилище для буферизации сообщений
-# Структура: { chat_id: { "text": "накопленный текст", "task": asyncio.Task } }
 user_buffers = {}
 
 
 def clean_line(text):
-    text = re.sub(r'^\d+[\.\)\-]\s*', '', text)
+    """
+    Мощная очистка строки.
+    Превращает: '1. Яд', '1) Яд', '1 Яд', '- Яд' -> в 'яд'
+    """
+    # Удаляем любые цифры, точки, скобки, тире и пробелы в начале
+    text = re.sub(r'^[\d\.\)\-\s]+', '', text)
     return text.strip().lower()
 
 
-def calculate_restoration(text):
-    """Логика подсчета (только восстановление)"""
+def identify_category(boss_name):
+    name_lower = boss_name.lower()
+    for name in CAT_BESPREDEL:
+        if name in name_lower: return 'bespredel'
+    for name in CAT_VERTUKHAI:
+        if name in name_lower: return 'vertuhai'
+    return 'other'
+
+
+def parse_and_calculate(text):
     lines = text.split('\n')
-    results = []
+    parsed_data = []
 
     current_boss_name = None
     restore_cost = 0
     used_hits = {}
+    current_moves_list = []
 
     def save_current_boss():
         if current_boss_name:
-            results.append(f"⚡️ <b>{current_boss_name}</b>: <code>{restore_cost}₽</code>")
+            category = identify_category(current_boss_name)
+            parsed_data.append({
+                'name': current_boss_name,
+                'cost': restore_cost,
+                'category': category,
+                'combo': current_moves_list
+            })
 
     for line in lines:
         line_stripped = line.strip()
         if not line_stripped: continue
 
+        # 1. Ищем строку с Боссом
         boss_match = re.search(r'Босс:\s*(.+)', line_stripped, re.IGNORECASE)
         if boss_match:
             save_current_boss()
             current_boss_name = boss_match.group(1).strip()
             restore_cost = 0
             used_hits = {}
+            current_moves_list = []
             continue
 
+        # 2. Обрабатываем удары
         if current_boss_name:
             move = clean_line(line_stripped)
-            if move in WEAPONS: continue
 
-            hit_type = HIT_TYPES.get(move)
-            if hit_type:
-                if used_hits.get(hit_type, 0) > 0:
-                    restore_cost += 3
-                else:
-                    used_hits[hit_type] = 1
-                used_hits[hit_type] += 1
+            is_weapon = move in WEAPONS
+            is_hit = HIT_TYPES.get(move) is not None
+
+            # Если это часть комбо (удар или оружие)
+            if is_weapon or is_hit:
+                current_moves_list.append(move)
+
+                # Считаем деньги только за повторные удары (не за оружие)
+                if not is_weapon and is_hit:
+                    hit_type = HIT_TYPES.get(move)
+                    if used_hits.get(hit_type, 0) > 0:
+                        restore_cost += 3
+                    else:
+                        used_hits[hit_type] = 1
+                    used_hits[hit_type] += 1
 
     save_current_boss()
-    return results
+    return parsed_data
+
+
+def format_response(data):
+    if not data: return None
+
+    # Группировка
+    bespredel_list = [x for x in data if x['category'] == 'bespredel']
+    vertuhai_list = [x for x in data if x['category'] == 'vertuhai']
+    other_list = [x for x in data if x['category'] == 'other']
+
+    # Сортировка по цене
+    bespredel_list.sort(key=lambda x: x['cost'])
+    vertuhai_list.sort(key=lambda x: x['cost'])
+    other_list.sort(key=lambda x: x['cost'])
+
+    response_lines = []
+
+    def add_section(title, items):
+        if items:
+            response_lines.append(f"<b>{title}</b>")
+            for item in items:
+                # Собираем комбо в одну строку через пробел (для компактности)
+                combo_text = " ".join(item['combo'])
+
+                # Формируем строку:
+                # Название — Цена (жирным)
+                # С новой строки: Спойлер, внутри которого код для копирования
+                line = (
+                    f"⚡️ {item['name']} — <b>{item['cost']} руб.</b>\n"
+                    f"<tg-spoiler><code>{combo_text}</code></tg-spoiler>"
+                )
+                response_lines.append(line)
+            response_lines.append("")
+
+    add_section("👹 Беспредельщики:", bespredel_list)
+    add_section("👮‍♂️ Вертухаи:", vertuhai_list)
+    add_section("❓ Остальные:", other_list)
+
+    return "\n".join(response_lines).strip()
 
 
 async def process_buffered_message(chat_id: int):
-    """Функция, которая запускается после таймера"""
     await asyncio.sleep(DELAY_SECONDS)
+    if chat_id not in user_buffers: return
 
-    # Если задача была отменена (пришло новое сообщение), код ниже не выполнится
-    # Но на всякий случай проверим наличие данных
-    if chat_id not in user_buffers:
-        return
-
-    data = user_buffers.pop(chat_id)  # Забираем данные и удаляем из буфера
-    full_text = data["text"]
-
+    data = user_buffers.pop(chat_id)
     try:
-        results = calculate_restoration(full_text)
-        if results:
-            response = "<b>⚡️ Итоговая стоимость восстановления:</b>\n\n" + "\n".join(results)
-            await bot.send_message(chat_id, response, parse_mode="HTML")
+        calculated_data = parse_and_calculate(data["text"])
+        final_text = format_response(calculated_data)
+
+        if final_text:
+            # Важно: parse_mode="HTML" нужен для работы спойлеров и жирного текста
+            await bot.send_message(chat_id, final_text, parse_mode="HTML")
     except Exception as e:
-        logging.error(f"Ошибка обработки: {e}")
+        logging.error(f"Error: {e}")
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("Привет! Пересылай сообщения, я объединю их и посчитаю.")
+    await message.answer("Привет! Пересылай сообщения с комбо.")
 
 
 @dp.message()
 async def handle_message(message: Message):
     chat_id = message.chat.id
     text = message.text or message.caption or ""
-
     if not text: return
 
-    # Если для этого юзера уже есть таймер - отменяем его
     if chat_id in user_buffers:
-        existing_task = user_buffers[chat_id]["task"]
-        if existing_task:
-            existing_task.cancel()
-
-        # Добавляем новый текст к старому через перенос строки
+        user_buffers[chat_id]["task"].cancel()
         user_buffers[chat_id]["text"] += "\n" + text
     else:
-        # Создаем новую запись
         user_buffers[chat_id] = {"text": text, "task": None}
 
-    # Создаем новую задачу (таймер)
-    task = asyncio.create_task(process_buffered_message(chat_id))
-    user_buffers[chat_id]["task"] = task
+    user_buffers[chat_id]["task"] = asyncio.create_task(process_buffered_message(chat_id))
 
 
 async def main():

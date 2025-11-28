@@ -10,10 +10,10 @@ TOKEN = "6021062306:AAHTS2uu15SPOCb5RxKhYVLTHldi6fAOn3A"
 DELAY_SECONDS = 1.0
 # =============================================
 
-# Список оружия для распознавания
+# Оружие (для определения строк с ударами)
 WEAPONS = ['яд', 'самопал', 'пал', 'финка', 'фин', 'финки']
 
-# Типы ударов для расчета восстановления
+# Типы ударов для расчета
 HIT_TYPES = {
     'ухо': 'head', 'колено': 'head',
     'пах': 'groin',
@@ -21,9 +21,19 @@ HIT_TYPES = {
     'грудь': 'chest', 'удар в грудь': 'chest'
 }
 
-# Категории боссов
+# Списки имен для категоризации
 CAT_BESPREDEL = ['сизый', 'махно', 'лютый', 'шайба']
 CAT_VERTUKHAI = ['палыч', 'циклоп', 'бес', 'паленый', 'борзов', 'бурят', 'хирург', 'раиса', 'близнецы', 'дюбель']
+
+# Объединенный список всех имен для поиска в тексте
+ALL_BOSS_NAMES = CAT_BESPREDEL + CAT_VERTUKHAI
+
+# Словарь для красивого форматирования режимов
+MODES_MAP = {
+    'пац': '(Пацанский)',
+    'блат': '(Блатной)',
+    'авто': '(Авторитетный)'
+}
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -34,21 +44,62 @@ user_buffers = {}
 
 def clean_line(text):
     """
-    Мощная очистка строки.
-    Превращает: '1. Яд', '1) Яд', '1 Яд', '- Яд' -> в 'яд'
+    Очищает строку от цифр и нумерации в начале.
+    '1. Грудь' -> 'грудь'
+    '1 грудь' -> 'грудь'
     """
-    # Удаляем любые цифры, точки, скобки, тире и пробелы в начале
+    # Удаляем цифры, точки, скобки, тире в начале строки
     text = re.sub(r'^[\d\.\)\-\s]+', '', text)
     return text.strip().lower()
 
 
 def identify_category(boss_name):
+    """Определяет категорию (Беспредельщик или Вертухай)"""
     name_lower = boss_name.lower()
     for name in CAT_BESPREDEL:
         if name in name_lower: return 'bespredel'
     for name in CAT_VERTUKHAI:
         if name in name_lower: return 'vertuhai'
     return 'other'
+
+
+def parse_boss_header(line):
+    """
+    Пытается понять, является ли строка заголовком босса.
+    Возвращает красивое имя или None.
+    Примеры:
+    'Сизый пац ☠️' -> 'Сизый (Пацанский)'
+    'Босс: Бес (Авто)' -> 'Бес (Авторитетный)'
+    """
+    line_lower = line.lower()
+
+    # 1. Ищем имя босса в строке
+    found_name = None
+    for name in ALL_BOSS_NAMES:
+        # Проверяем, есть ли имя босса как отдельное слово или в составе
+        if name in line_lower:
+            found_name = name.capitalize()  # Делаем с большой буквы
+            break
+
+    if not found_name:
+        return None
+
+    # 2. Ищем режим (пац, блат, авто)
+    found_mode = ""
+    for key, value in MODES_MAP.items():
+        if key in line_lower:
+            found_mode = value
+            break
+
+    # Если режим не нашли, но строка явно содержит "Босс:", оставляем как есть
+    if not found_mode and "босс" not in line_lower:
+        # Если это просто имя босса (например "Сизый") и это не похоже на удар,
+        # то считаем заголовком без режима, если в строке нет слов-ударов
+        is_hit = any(w in line_lower for w in WEAPONS + list(HIT_TYPES.keys()))
+        if is_hit:
+            return None  # Это строка с ударом, где случайно упомянули босса (редко, но бывает)
+
+    return f"{found_name} {found_mode}".strip()
 
 
 def parse_and_calculate(text):
@@ -74,11 +125,12 @@ def parse_and_calculate(text):
         line_stripped = line.strip()
         if not line_stripped: continue
 
-        # 1. Ищем строку с Боссом
-        boss_match = re.search(r'Босс:\s*(.+)', line_stripped, re.IGNORECASE)
-        if boss_match:
+        # 1. Проверяем, является ли строка Боссом (новый метод)
+        boss_header = parse_boss_header(line_stripped)
+
+        if boss_header:
             save_current_boss()
-            current_boss_name = boss_match.group(1).strip()
+            current_boss_name = boss_header
             restore_cost = 0
             used_hits = {}
             current_moves_list = []
@@ -91,11 +143,10 @@ def parse_and_calculate(text):
             is_weapon = move in WEAPONS
             is_hit = HIT_TYPES.get(move) is not None
 
-            # Если это часть комбо (удар или оружие)
             if is_weapon or is_hit:
                 current_moves_list.append(move)
 
-                # Считаем деньги только за повторные удары (не за оружие)
+                # Считаем деньги (только удары)
                 if not is_weapon and is_hit:
                     hit_type = HIT_TYPES.get(move)
                     if used_hits.get(hit_type, 0) > 0:
@@ -127,12 +178,7 @@ def format_response(data):
         if items:
             response_lines.append(f"<b>{title}</b>")
             for item in items:
-                # Собираем комбо в одну строку через пробел (для компактности)
                 combo_text = " ".join(item['combo'])
-
-                # Формируем строку:
-                # Название — Цена (жирным)
-                # С новой строки: Спойлер, внутри которого код для копирования
                 line = (
                     f"⚡️ {item['name']} — <b>{item['cost']} руб.</b>\n"
                     f"<tg-spoiler><code>{combo_text}</code></tg-spoiler>"
@@ -157,7 +203,6 @@ async def process_buffered_message(chat_id: int):
         final_text = format_response(calculated_data)
 
         if final_text:
-            # Важно: parse_mode="HTML" нужен для работы спойлеров и жирного текста
             await bot.send_message(chat_id, final_text, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Error: {e}")
@@ -165,7 +210,7 @@ async def process_buffered_message(chat_id: int):
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("Привет! Пересылай сообщения с комбо.")
+    await message.answer("Привет! Я готов обрабатывать любые форматы комбо.")
 
 
 @dp.message()
